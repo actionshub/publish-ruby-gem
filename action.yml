@@ -19,7 +19,6 @@ inputs:
     description: "Ruby version to use. Defaults to 4.0"
     required: false
     default: "4.0"
-
 runs:
   using: "composite"
   steps:
@@ -27,33 +26,32 @@ runs:
       uses: ruby/setup-ruby@v1
       with:
         ruby-version: ${{ inputs.ruby-version }}
-
     - shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
         git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-        
+
         # Use provided token or error out
         TOKEN="${{ inputs.token }}"
         if [ -z "$TOKEN" ]; then
           echo "Error: Missing token"
           exit 2
         fi
-        
+
         # Determine owner
         OWNER="${{ inputs.owner }}"
         if [ -z "$OWNER" ]; then
           OWNER="${GITHUB_REPOSITORY_OWNER}"
         fi
-        
+
         echo "Setting up access to RubyGems"
         mkdir -p ~/.gem
         echo ":github: Bearer ${TOKEN}" > ~/.gem/credentials
         chmod 600 ~/.gem/credentials
-        
+
         echo "Building gem(s)"
         find . -name '*.gemspec' -maxdepth 1 -exec gem build {} \;
-        
+
         echo "Pushing gem(s) to GitHub Package Registry"
         # Push only the gems that were just built in this directory
         # (RubyGems 'gem build' places them in the current directory)
@@ -63,3 +61,4 @@ runs:
             gem push "$gem" --key "github" --host "https://rubygems.pkg.github.com/${OWNER}"
           fi
         done
+  image: docker://ghcr.io/actionshub/publish-ruby-gem:v0.0.2
