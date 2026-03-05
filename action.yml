@@ -1,4 +1,4 @@
-name: "Publish Ruby Gem"
+name: "Publish Gem to GitHub Packages"
 description: "Builds and publishes Ruby gems to GitHub Packages"
 author: "Dan Webb"
 branding:
@@ -6,8 +6,17 @@ branding:
   icon: upload-cloud
 inputs:
   token:
-    description: "GitHub token that has access to write to GitHub package registry. You can use GITHUB_TOKEN for this."
-    required: true
+    description: "GitHub token for GitHub package registry. (Alias for github_token)"
+    required: false
+  github_token:
+    description: "GitHub token for GitHub package registry."
+    required: false
+  rubygems_token:
+    description: "API key for rubygems.org."
+    required: false
+  gemcoop_token:
+    description: "API key for gem.coop."
+    required: false
   owner:
     description: "Name of the user or organization account that owns the repository containing your project. Defaults to $GITHUB_REPOSITORY_OWNER"
     required: false
@@ -19,6 +28,7 @@ inputs:
     description: "Ruby version to use. Defaults to 4.0"
     required: false
     default: "4.0"
+
 runs:
   using: "composite"
   steps:
@@ -26,39 +36,75 @@ runs:
       uses: ruby/setup-ruby@v1
       with:
         ruby-version: ${{ inputs.ruby-version }}
+
     - shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
         git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-
-        # Use provided token or error out
-        TOKEN="${{ inputs.token }}"
-        if [ -z "$TOKEN" ]; then
-          echo "Error: Missing token"
+        
+        # Collect tokens
+        GITHUB_TOKEN="${{ inputs.github_token || inputs.token }}"
+        RUBYGEMS_TOKEN="${{ inputs.rubygems_token }}"
+        GEMCOOP_TOKEN="${{ inputs.gemcoop_token }}"
+        
+        # Check if at least one token is provided
+        if [ -z "$GITHUB_TOKEN" ] && [ -z "$RUBYGEMS_TOKEN" ] && [ -z "$GEMCOOP_TOKEN" ]; then
+          echo "Error: No API keys found. Please provide at least one of: token, github_token, rubygems_token, or gemcoop_token."
           exit 2
         fi
-
-        # Determine owner
+        
+        # Determine owner for GitHub Packages
         OWNER="${{ inputs.owner }}"
         if [ -z "$OWNER" ]; then
           OWNER="${GITHUB_REPOSITORY_OWNER}"
         fi
-
+        
         echo "Setting up access to RubyGems"
         mkdir -p ~/.gem
-        echo ":github: Bearer ${TOKEN}" > ~/.gem/credentials
+        touch ~/.gem/credentials
         chmod 600 ~/.gem/credentials
-
+        
+        # Build credentials file
+        # We start with an empty file and append each configured host
+        : > ~/.gem/credentials
+        
+        if [ -n "$RUBYGEMS_TOKEN" ]; then
+          echo "Configuring RubyGems.org"
+          echo ":rubygems_api_key: ${RUBYGEMS_TOKEN}" >> ~/.gem/credentials
+        fi
+        
+        if [ -n "$GITHUB_TOKEN" ]; then
+          echo "Configuring GitHub Packages"
+          echo ":github: Bearer ${GITHUB_TOKEN}" >> ~/.gem/credentials
+        fi
+        
+        if [ -n "$GEMCOOP_TOKEN" ]; then
+          echo "Configuring Gem.coop"
+          # Assuming standard token usage for gem.coop
+          echo ":gemcoop: ${GEMCOOP_TOKEN}" >> ~/.gem/credentials
+        fi
+        
         echo "Building gem(s)"
         find . -name '*.gemspec' -maxdepth 1 -exec gem build {} \;
-
-        echo "Pushing gem(s) to GitHub Package Registry"
-        # Push only the gems that were just built in this directory
-        # (RubyGems 'gem build' places them in the current directory)
+        
+        # Push to each configured registry
         for gem in *.gem; do
           if [ -f "$gem" ]; then
-            echo "Pushing $gem to GitHub Packages host https://rubygems.pkg.github.com/${OWNER}"
-            gem push "$gem" --key "github" --host "https://rubygems.pkg.github.com/${OWNER}"
+            
+            if [ -n "$RUBYGEMS_TOKEN" ]; then
+              echo "Pushing $gem to RubyGems.org"
+              gem push "$gem"
+            fi
+            
+            if [ -n "$GITHUB_TOKEN" ]; then
+              echo "Pushing $gem to GitHub Packages host https://rubygems.pkg.github.com/${OWNER}"
+              gem push "$gem" --key "github" --host "https://rubygems.pkg.github.com/${OWNER}"
+            fi
+            
+            if [ -n "$GEMCOOP_TOKEN" ]; then
+              echo "Pushing $gem to Gem.coop"
+              gem push "$gem" --key "gemcoop" --host "https://gem.coop"
+            fi
+            
           fi
         done
-  image: docker://ghcr.io/actionshub/publish-ruby-gem:v0.0.2
