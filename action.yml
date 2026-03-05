@@ -1,5 +1,4 @@
----
-name: "Publish Gem to GitHub Packages"
+name: "Publish Ruby Gem"
 description: "Builds and publishes Ruby gems to GitHub Packages"
 author: "Dan Webb"
 branding:
@@ -16,10 +15,51 @@ inputs:
     description: "An optional path to switch to before building the Gem."
     required: false
     default: "."
+  ruby-version:
+    description: "Ruby version to use. Defaults to 4.0"
+    required: false
+    default: "4.0"
+
 runs:
-  using: "docker"
-  image: docker://ghcr.io/actionshub/publish-gem-to-github:v1.0.12
-  args:
-    - ${{ inputs.token }}
-    - ${{ inputs.owner }}
-    - ${{ inputs.working-directory }}
+  using: "composite"
+  steps:
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ inputs.ruby-version }}
+
+    - shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+        
+        # Use provided token or error out
+        TOKEN="${{ inputs.token }}"
+        if [ -z "$TOKEN" ]; then
+          echo "Error: Missing token"
+          exit 2
+        fi
+        
+        # Determine owner
+        OWNER="${{ inputs.owner }}"
+        if [ -z "$OWNER" ]; then
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+        fi
+        
+        echo "Setting up access to RubyGems"
+        mkdir -p ~/.gem
+        echo ":github: Bearer ${TOKEN}" > ~/.gem/credentials
+        chmod 600 ~/.gem/credentials
+        
+        echo "Building gem(s)"
+        find . -name '*.gemspec' -maxdepth 1 -exec gem build {} \;
+        
+        echo "Pushing gem(s) to GitHub Package Registry"
+        # Push only the gems that were just built in this directory
+        # (RubyGems 'gem build' places them in the current directory)
+        for gem in *.gem; do
+          if [ -f "$gem" ]; then
+            echo "Pushing $gem to GitHub Packages host https://rubygems.pkg.github.com/${OWNER}"
+            gem push "$gem" --key "github" --host "https://rubygems.pkg.github.com/${OWNER}"
+          fi
+        done
