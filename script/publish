@@ -144,6 +144,12 @@ function validate_inputs() {
   fi
 }
 
+function validate_tools() {
+  if ! command -v jq > /dev/null 2>&1 || ! jq -n true > /dev/null 2>&1; then
+    fail 2 "jq is required to write publish outputs."
+  fi
+}
+
 function setup_credentials_file() {
   echo "Setting up access to RubyGems"
   mkdir -p ~/.gem
@@ -378,81 +384,28 @@ function write_summary() {
   } >> "${GITHUB_STEP_SUMMARY}"
 }
 
-function json_escape() {
-  local value="${1}"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  value="${value//$'\b'/\\b}"
-  value="${value//$'\f'/\\f}"
-  value="${value//$'\n'/\\n}"
-  value="${value//$'\r'/\\r}"
-  value="${value//$'\t'/\\t}"
-  echo "${value}"
-}
-
-function json_string() {
-  echo "\"$(json_escape "${1}")\""
-}
-
-function json_array() {
-  local values=("$@")
-  local json="["
-  local index
-
-  for index in "${!values[@]}"; do
-    if [ "${index}" -gt 0 ]; then
-      json+=","
-    fi
-    json+="$(json_string "${values[${index}]}")"
-  done
-
-  json+="]"
-  echo "${json}"
+function registries_json() {
+  jq -cn '$ARGS.positional' --args "${REGISTRIES[@]}"
 }
 
 function unique_versions() {
-  local versions=()
-  local version
-  local seen
-
-  for version in "${BUILT_GEM_VERSIONS[@]}"; do
-    seen="false"
-
-    local existing
-    for existing in "${versions[@]}"; do
-      if [ "${existing}" = "${version}" ]; then
-        seen="true"
-        break
-      fi
-    done
-
-    if [ "${seen}" = "false" ]; then
-      versions+=("${version}")
-    fi
-  done
-
-  join_by "," "${versions[@]}"
+  printf '%s\n' "${BUILT_GEM_VERSIONS[@]}" \
+    | jq -Rrsc 'split("\n") | map(select(length > 0)) | reduce .[] as $version ([]; if index($version) then . else . + [$version] end) | join(",")'
 }
 
 function releases_json() {
-  local json="["
+  local registries
   local index
+  registries="$(registries_json)"
 
   for index in "${!BUILT_GEMS[@]}"; do
-    if [ "${index}" -gt 0 ]; then
-      json+=","
-    fi
-
-    json+="{"
-    json+="\"name\":$(json_string "${BUILT_GEM_NAMES[${index}]}"),"
-    json+="\"version\":$(json_string "${BUILT_GEM_VERSIONS[${index}]}"),"
-    json+="\"file\":$(json_string "$(basename "${BUILT_GEMS[${index}]}")"),"
-    json+="\"registries\":$(json_array "${REGISTRIES[@]}")"
-    json+="}"
-  done
-
-  json+="]"
-  echo "${json}"
+    jq -cn \
+      --arg name "${BUILT_GEM_NAMES[${index}]}" \
+      --arg version "${BUILT_GEM_VERSIONS[${index}]}" \
+      --arg file "$(basename "${BUILT_GEMS[${index}]}")" \
+      --argjson registries "${registries}" \
+      '{name: $name, version: $version, file: $file, registries: $registries}'
+  done | jq -cs .
 }
 
 function write_outputs() {
@@ -463,6 +416,7 @@ function write_outputs() {
 
 setup_git
 validate_inputs
+validate_tools
 setup_credentials_file
 build_gems
 push_gems

@@ -127,6 +127,7 @@ Example `releases` value:
 - Only gems built during the current action run are pushed.
 - Failed builds and failed pushes stop the action with a GitHub Actions error annotation.
 - Token values are masked before any publish work starts.
+- `jq` is required for structured outputs. GitHub-hosted Ubuntu runners, including `ubuntu-slim`, include `jq`; self-hosted runners must provide it.
 
 ## Credits
 

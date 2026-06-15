@@ -3,8 +3,14 @@
 set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REAL_JQ="$(command -v jq)"
 TEST_DIRS=()
 FAILURES=0
+
+if [ -z "${REAL_JQ}" ]; then
+  echo "jq is required to run publish tests"
+  exit 1
+fi
 
 RUN_DIR=""
 BIN_DIR=""
@@ -128,7 +134,17 @@ case "${GEM_STUB_MODE}:${1}" in
 esac
 STUB
 
-  chmod +x "${BIN_DIR}/git" "${BIN_DIR}/gem"
+  cat > "${BIN_DIR}/jq" <<'STUB'
+#!/usr/bin/env bash
+if [ "${JQ_STUB_MODE:-}" = "missing" ]; then
+  echo "jq disabled by test" >&2
+  exit 127
+fi
+
+exec "${REAL_JQ}" "$@"
+STUB
+
+  chmod +x "${BIN_DIR}/git" "${BIN_DIR}/gem" "${BIN_DIR}/jq"
   echo "Running ${test_name}"
 }
 
@@ -196,6 +212,8 @@ function run_publish() {
       PUBLISH_GEM_GITEA_OWNER="${gitea_owner}" \
       GEM_LOG="${GEM_LOG}" \
       GEM_STUB_MODE="${stub_mode}" \
+      JQ_STUB_MODE="${JQ_STUB_MODE:-}" \
+      REAL_JQ="${REAL_JQ}" \
       PATH="${BIN_DIR}:${PATH}" \
       "${ROOT_DIR}/script/publish" > "${STDOUT_FILE}" 2> "${STDERR_FILE}"
   )
@@ -267,7 +285,12 @@ function assert_gem_log_count() {
   local message="${3}"
   local actual
 
-  actual="$(grep -Fc -- "${pattern}" "${GEM_LOG}" 2> /dev/null || true)"
+  if [ -f "${GEM_LOG}" ]; then
+    actual="$(grep -Fc -- "${pattern}" "${GEM_LOG}" || true)"
+  else
+    actual=0
+  fi
+
   if [ "${actual}" -ne "${expected}" ]; then
     fail "${message}: expected ${expected} matches for '${pattern}', got ${actual}"
   fi
@@ -322,6 +345,11 @@ assert_file_contains "${STDOUT_FILE}" "::error::Forgejo publishing requires forg
 run_publish "Gitea token requires URL" success "" "" "" "" "sous-chefs" "" "" "" "gitea-token" "" "" alpha
 assert_exit_code 2 "gitea missing url"
 assert_file_contains "${STDOUT_FILE}" "::error::Gitea publishing requires gitea_url." "gitea missing url error command"
+
+JQ_STUB_MODE="missing" run_publish "missing jq fails before build" success "" "ruby-token" "" "" "sous-chefs" "" "" "" "" "" "" alpha
+assert_exit_code 2 "missing jq"
+assert_file_contains "${STDOUT_FILE}" "::error::jq is required to write publish outputs." "missing jq error command"
+assert_gem_log_count 0 "build alpha.gemspec --output" "missing jq does not build"
 
 run_publish "successful multi-gemspec publish pushes current artifacts" success "github-token" "ruby-token" "gemcoop-token" "" "sous-chefs" "" "" "" "" "" "" alpha beta
 assert_exit_code 0 "successful publish"
