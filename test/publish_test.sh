@@ -11,6 +11,7 @@ BIN_DIR=""
 HOME_DIR=""
 WORKSPACE_DIR=""
 SUMMARY_FILE=""
+OUTPUT_FILE=""
 STDOUT_FILE=""
 STDERR_FILE=""
 GEM_LOG=""
@@ -33,6 +34,7 @@ function prepare_run() {
   HOME_DIR="${RUN_DIR}/home"
   WORKSPACE_DIR="${RUN_DIR}/workspace"
   SUMMARY_FILE="${RUN_DIR}/summary.md"
+  OUTPUT_FILE="${RUN_DIR}/output"
   STDOUT_FILE="${RUN_DIR}/stdout"
   STDERR_FILE="${RUN_DIR}/stderr"
   GEM_LOG="${RUN_DIR}/gem.log"
@@ -181,6 +183,7 @@ function run_publish() {
       GITHUB_WORKSPACE="${WORKSPACE_DIR}" \
       GITHUB_REPOSITORY_OWNER="${repository_owner}" \
       GITHUB_STEP_SUMMARY="${SUMMARY_FILE}" \
+      GITHUB_OUTPUT="${OUTPUT_FILE}" \
       PUBLISH_GEM_GITHUB_TOKEN="${github_token}" \
       PUBLISH_GEM_RUBYGEMS_TOKEN="${rubygems_token}" \
       PUBLISH_GEM_GEMCOOP_TOKEN="${gemcoop_token}" \
@@ -248,6 +251,16 @@ function assert_file_not_contains() {
   fi
 }
 
+function assert_file_line() {
+  local file="${1}"
+  local expected="${2}"
+  local message="${3}"
+
+  if ! grep -Fxq -- "${expected}" "${file}"; then
+    fail "${message}: expected ${file} to contain line '${expected}'"
+  fi
+}
+
 function assert_gem_log_count() {
   local expected="${1}"
   local pattern="${2}"
@@ -263,6 +276,7 @@ function assert_gem_log_count() {
 run_publish "no tokens exits 2" success "" "" "" "" "sous-chefs" "" "" "" "" "" "" alpha
 assert_exit_code 2 "no tokens"
 assert_file_contains "${STDOUT_FILE}" "::error::No API keys found." "no-token error command"
+assert_file_line "${OUTPUT_FILE}" "completed=false" "no-token completed output"
 
 run_publish "no gemspec fails clearly" success "" "ruby-token" "" "" "sous-chefs" "" "" "" "" "" ""
 assert_exit_code 1 "no gemspec"
@@ -323,6 +337,9 @@ assert_file_contains "${SUMMARY_FILE}" "RubyGems.org" "summary includes rubygems
 assert_file_not_contains "${SUMMARY_FILE}" "github-token" "summary excludes github token"
 assert_file_not_contains "${SUMMARY_FILE}" "ruby-token" "summary excludes rubygems token"
 assert_file_not_contains "${SUMMARY_FILE}" "gemcoop-token" "summary excludes gemcoop token"
+assert_file_line "${OUTPUT_FILE}" "completed=true" "successful completed output"
+assert_file_line "${OUTPUT_FILE}" "version=0.1.0" "successful version output"
+assert_file_contains "${OUTPUT_FILE}" "releases=[{\"name\":\"alpha\",\"version\":\"0.1.0\",\"file\":\"alpha-0.1.0.gem\",\"registries\":[\"RubyGems.org\",\"GitHub Packages\",\"Gem.coop\"]},{\"name\":\"beta\",\"version\":\"0.1.0\",\"file\":\"beta-0.1.0.gem\",\"registries\":[\"RubyGems.org\",\"GitHub Packages\",\"Gem.coop\"]}]" "successful releases output"
 
 run_publish "Forgejo and Gitea publish use documented package hosts" success "" "" "" "fallback-owner" "sous-chefs" "forgejo-token" "https://forgejo.example.com/" "" "gitea-token" "https://gitea.example.com" "gitea-owner" alpha
 assert_exit_code 0 "forgejo and gitea publish"

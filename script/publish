@@ -17,7 +17,11 @@ GITEA_HOST=""
 OWNER="${PUBLISH_GEM_OWNER:-}"
 BUILD_DIR=""
 BUILT_GEMS=()
+BUILT_GEM_NAMES=()
+BUILT_GEM_VERSIONS=()
 REGISTRIES=()
+GEM_NAME=""
+GEM_VERSION=""
 GEM_FULL_NAME=""
 
 function workflow_escape() {
@@ -32,10 +36,22 @@ function workflow_error() {
   echo "::error::$(workflow_escape "${1}")"
 }
 
+function write_output() {
+  local name="${1}"
+  local value="${2}"
+
+  if [ -z "${GITHUB_OUTPUT:-}" ]; then
+    return
+  fi
+
+  echo "${name}=${value}" >> "${GITHUB_OUTPUT}"
+}
+
 function fail() {
   local exit_code="${1}"
   local message="${2}"
 
+  write_output "completed" "false"
   workflow_error "${message}"
   exit "${exit_code}"
 }
@@ -166,13 +182,13 @@ function setup_credentials_file() {
   fi
 }
 
-function resolve_gem_full_name() {
+function resolve_gem_metadata() {
   local gemspec="${1}"
   local ruby_output
   local exit_code
 
   set +e
-  ruby_output="$(ruby -e 'require "rubygems"; spec = Gem::Specification.load(ARGV.fetch(0)); abort "Could not load gemspec #{ARGV.fetch(0)}" unless spec; print spec.full_name' "${gemspec}" 2>&1)"
+  ruby_output="$(ruby -e 'require "rubygems"; spec = Gem::Specification.load(ARGV.fetch(0)); abort "Could not load gemspec #{ARGV.fetch(0)}" unless spec; puts [spec.name, spec.version.to_s, spec.full_name].join("\t")' "${gemspec}" 2>&1)"
   exit_code=$?
   set -e
 
@@ -181,7 +197,7 @@ function resolve_gem_full_name() {
     fail "${exit_code}" "Failed to load ${gemspec}."
   fi
 
-  GEM_FULL_NAME="${ruby_output}"
+  IFS=$'\t' read -r GEM_NAME GEM_VERSION GEM_FULL_NAME <<< "${ruby_output}"
 }
 
 function join_by() {
@@ -214,7 +230,7 @@ function build_gems() {
   local gemspec
   for gemspec in "${gemspecs[@]}"; do
     local output
-    resolve_gem_full_name "${gemspec}"
+    resolve_gem_metadata "${gemspec}"
     output="${BUILD_DIR}/${GEM_FULL_NAME}.gem"
 
     set +e
@@ -231,6 +247,8 @@ function build_gems() {
     fi
 
     BUILT_GEMS+=("${output}")
+    BUILT_GEM_NAMES+=("${GEM_NAME}")
+    BUILT_GEM_VERSIONS+=("${GEM_VERSION}")
   done
 }
 
@@ -360,9 +378,93 @@ function write_summary() {
   } >> "${GITHUB_STEP_SUMMARY}"
 }
 
+function json_escape() {
+  local value="${1}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\b'/\\b}"
+  value="${value//$'\f'/\\f}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  echo "${value}"
+}
+
+function json_string() {
+  echo "\"$(json_escape "${1}")\""
+}
+
+function json_array() {
+  local values=("$@")
+  local json="["
+  local index
+
+  for index in "${!values[@]}"; do
+    if [ "${index}" -gt 0 ]; then
+      json+=","
+    fi
+    json+="$(json_string "${values[${index}]}")"
+  done
+
+  json+="]"
+  echo "${json}"
+}
+
+function unique_versions() {
+  local versions=()
+  local version
+  local seen
+
+  for version in "${BUILT_GEM_VERSIONS[@]}"; do
+    seen="false"
+
+    local existing
+    for existing in "${versions[@]}"; do
+      if [ "${existing}" = "${version}" ]; then
+        seen="true"
+        break
+      fi
+    done
+
+    if [ "${seen}" = "false" ]; then
+      versions+=("${version}")
+    fi
+  done
+
+  join_by "," "${versions[@]}"
+}
+
+function releases_json() {
+  local json="["
+  local index
+
+  for index in "${!BUILT_GEMS[@]}"; do
+    if [ "${index}" -gt 0 ]; then
+      json+=","
+    fi
+
+    json+="{"
+    json+="\"name\":$(json_string "${BUILT_GEM_NAMES[${index}]}"),"
+    json+="\"version\":$(json_string "${BUILT_GEM_VERSIONS[${index}]}"),"
+    json+="\"file\":$(json_string "$(basename "${BUILT_GEMS[${index}]}")"),"
+    json+="\"registries\":$(json_array "${REGISTRIES[@]}")"
+    json+="}"
+  done
+
+  json+="]"
+  echo "${json}"
+}
+
+function write_outputs() {
+  write_output "releases" "$(releases_json)"
+  write_output "version" "$(unique_versions)"
+  write_output "completed" "true"
+}
+
 setup_git
 validate_inputs
 setup_credentials_file
 build_gems
 push_gems
 write_summary
+write_outputs

@@ -46,6 +46,16 @@ inputs:
     description: "Ruby version to use. Defaults to 4.0"
     required: false
     default: "4.0"
+outputs:
+  releases:
+    description: "JSON array of built gem releases with name, version, file, and registries."
+    value: ${{ steps.publish.outputs.releases }}
+  version:
+    description: "Unique published gem version, or comma-separated versions when multiple gemspecs produce different versions."
+    value: ${{ steps.publish.outputs.version }}
+  completed:
+    description: "true when every configured publish completed successfully; false when the publish script fails."
+    value: ${{ steps.publish.outputs.completed }}
 
 runs:
   using: "composite"
@@ -55,7 +65,8 @@ runs:
       with:
         ruby-version: ${{ inputs.ruby-version }}
 
-    - shell: bash
+    - id: publish
+      shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
         PUBLISH_GEM_GITHUB_TOKEN: ${{ inputs.github_token || inputs.token }}
