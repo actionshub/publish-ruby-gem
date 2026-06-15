@@ -6,6 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 shell_scripts=(script/publish test/publish_test.sh script/check)
 
+command -v jq > /dev/null
 bash -n "${shell_scripts[@]}"
 shellcheck "${shell_scripts[@]}"
 ruby -e 'require "yaml"; YAML.load_file("action.yml")'

@@ -17,7 +17,11 @@ GITEA_HOST=""
 OWNER="${PUBLISH_GEM_OWNER:-}"
 BUILD_DIR=""
 BUILT_GEMS=()
+BUILT_GEM_NAMES=()
+BUILT_GEM_VERSIONS=()
 REGISTRIES=()
+GEM_NAME=""
+GEM_VERSION=""
 GEM_FULL_NAME=""
 
 function workflow_escape() {
@@ -32,10 +36,22 @@ function workflow_error() {
   echo "::error::$(workflow_escape "${1}")"
 }
 
+function write_output() {
+  local name="${1}"
+  local value="${2}"
+
+  if [ -z "${GITHUB_OUTPUT:-}" ]; then
+    return
+  fi
+
+  echo "${name}=${value}" >> "${GITHUB_OUTPUT}"
+}
+
 function fail() {
   local exit_code="${1}"
   local message="${2}"
 
+  write_output "completed" "false"
   workflow_error "${message}"
   exit "${exit_code}"
 }
@@ -128,6 +144,12 @@ function validate_inputs() {
   fi
 }
 
+function validate_tools() {
+  if ! command -v jq > /dev/null 2>&1 || ! jq -n true > /dev/null 2>&1; then
+    fail 2 "jq is required to write publish outputs."
+  fi
+}
+
 function setup_credentials_file() {
   echo "Setting up access to RubyGems"
   mkdir -p ~/.gem
@@ -166,13 +188,13 @@ function setup_credentials_file() {
   fi
 }
 
-function resolve_gem_full_name() {
+function resolve_gem_metadata() {
   local gemspec="${1}"
   local ruby_output
   local exit_code
 
   set +e
-  ruby_output="$(ruby -e 'require "rubygems"; spec = Gem::Specification.load(ARGV.fetch(0)); abort "Could not load gemspec #{ARGV.fetch(0)}" unless spec; print spec.full_name' "${gemspec}" 2>&1)"
+  ruby_output="$(ruby -e 'require "rubygems"; spec = Gem::Specification.load(ARGV.fetch(0)); abort "Could not load gemspec #{ARGV.fetch(0)}" unless spec; puts [spec.name, spec.version.to_s, spec.full_name].join("\t")' "${gemspec}" 2>&1)"
   exit_code=$?
   set -e
 
@@ -181,7 +203,7 @@ function resolve_gem_full_name() {
     fail "${exit_code}" "Failed to load ${gemspec}."
   fi
 
-  GEM_FULL_NAME="${ruby_output}"
+  IFS=$'\t' read -r GEM_NAME GEM_VERSION GEM_FULL_NAME <<< "${ruby_output}"
 }
 
 function join_by() {
@@ -214,7 +236,7 @@ function build_gems() {
   local gemspec
   for gemspec in "${gemspecs[@]}"; do
     local output
-    resolve_gem_full_name "${gemspec}"
+    resolve_gem_metadata "${gemspec}"
     output="${BUILD_DIR}/${GEM_FULL_NAME}.gem"
 
     set +e
@@ -231,6 +253,8 @@ function build_gems() {
     fi
 
     BUILT_GEMS+=("${output}")
+    BUILT_GEM_NAMES+=("${GEM_NAME}")
+    BUILT_GEM_VERSIONS+=("${GEM_VERSION}")
   done
 }
 
@@ -360,9 +384,41 @@ function write_summary() {
   } >> "${GITHUB_STEP_SUMMARY}"
 }
 
+function registries_json() {
+  jq -cn '$ARGS.positional' --args "${REGISTRIES[@]}"
+}
+
+function unique_versions() {
+  printf '%s\n' "${BUILT_GEM_VERSIONS[@]}" \
+    | jq -Rrsc 'split("\n") | map(select(length > 0)) | reduce .[] as $version ([]; if index($version) then . else . + [$version] end) | join(",")'
+}
+
+function releases_json() {
+  local registries
+  local index
+  registries="$(registries_json)"
+
+  for index in "${!BUILT_GEMS[@]}"; do
+    jq -cn \
+      --arg name "${BUILT_GEM_NAMES[${index}]}" \
+      --arg version "${BUILT_GEM_VERSIONS[${index}]}" \
+      --arg file "$(basename "${BUILT_GEMS[${index}]}")" \
+      --argjson registries "${registries}" \
+      '{name: $name, version: $version, file: $file, registries: $registries}'
+  done | jq -cs .
+}
+
+function write_outputs() {
+  write_output "releases" "$(releases_json)"
+  write_output "version" "$(unique_versions)"
+  write_output "completed" "true"
+}
+
 setup_git
 validate_inputs
+validate_tools
 setup_credentials_file
 build_gems
 push_gems
 write_summary
+write_outputs

@@ -105,6 +105,20 @@ Gitea publishes to `https://gitea.example.com/api/packages/{owner}/rubygems`.
 | `working-directory` | Path to switch to before building the gem. | `.` |
 | `ruby-version` | Ruby version to use for build and push. | `4.0` |
 
+## Outputs
+
+| Output | Description |
+|--------|-------------|
+| `completed` | `true` when every configured publish completes successfully. Failure paths emit `false` before exiting. |
+| `version` | Unique published gem version, or comma-separated versions when multiple gemspecs produce different versions. |
+| `releases` | JSON array of built releases. Each entry includes `name`, `version`, `file`, and `registries`. |
+
+Example `releases` value:
+
+```json
+[{"name":"my-gem","version":"1.2.3","file":"my-gem-1.2.3.gem","registries":["RubyGems.org","GitHub Packages"]}]
+```
+
 ## Behavior
 
 - At least one registry token is required.
@@ -113,6 +127,7 @@ Gitea publishes to `https://gitea.example.com/api/packages/{owner}/rubygems`.
 - Only gems built during the current action run are pushed.
 - Failed builds and failed pushes stop the action with a GitHub Actions error annotation.
 - Token values are masked before any publish work starts.
+- `jq` is required for structured outputs. GitHub-hosted Ubuntu runners, including `ubuntu-slim`, include `jq`; self-hosted runners must provide it.
 
 ## Credits
 
