@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+shopt -s nullglob
+
+GITHUB_TOKEN="${PUBLISH_GEM_GITHUB_TOKEN:-}"
+RUBYGEMS_TOKEN="${PUBLISH_GEM_RUBYGEMS_TOKEN:-}"
+GEMCOOP_TOKEN="${PUBLISH_GEM_GEMCOOP_TOKEN:-}"
+FORGEJO_TOKEN="${PUBLISH_GEM_FORGEJO_TOKEN:-}"
+FORGEJO_URL="${PUBLISH_GEM_FORGEJO_URL:-}"
+FORGEJO_OWNER="${PUBLISH_GEM_FORGEJO_OWNER:-}"
+FORGEJO_HOST=""
+GITEA_TOKEN="${PUBLISH_GEM_GITEA_TOKEN:-}"
+GITEA_URL="${PUBLISH_GEM_GITEA_URL:-}"
+GITEA_OWNER="${PUBLISH_GEM_GITEA_OWNER:-}"
+GITEA_HOST=""
+OWNER="${PUBLISH_GEM_OWNER:-}"
+BUILD_DIR=""
+BUILT_GEMS=()
+REGISTRIES=()
+GEM_FULL_NAME=""
+
+function workflow_escape() {
+  local value="${1}"
+  value="${value//'%'/'%25'}"
+  value="${value//$'\r'/'%0D'}"
+  value="${value//$'\n'/'%0A'}"
+  echo "${value}"
+}
+
+function workflow_error() {
+  echo "::error::$(workflow_escape "${1}")"
+}
+
+function fail() {
+  local exit_code="${1}"
+  local message="${2}"
+
+  workflow_error "${message}"
+  exit "${exit_code}"
+}
+
+function mask_token() {
+  local token="${1}"
+
+  if [ -n "${token}" ]; then
+    echo "::add-mask::$(workflow_escape "${token}")"
+  fi
+}
+
+function cleanup() {
+  if [ -n "${BUILD_DIR}" ] && [ -d "${BUILD_DIR}" ]; then
+    rm -rf "${BUILD_DIR}"
+  fi
+}
+
+trap cleanup EXIT
+
+function setup_git() {
+  git config --global --add safe.directory "${GITHUB_WORKSPACE:-$(pwd)}"
+}
+
+function trim_trailing_slash() {
+  local value="${1}"
+
+  while [[ "${value}" == */ ]]; do
+    value="${value%/}"
+  done
+
+  echo "${value}"
+}
+
+function package_owner() {
+  local registry_owner="${1}"
+
+  if [ -n "${registry_owner}" ]; then
+    echo "${registry_owner}"
+  elif [ -n "${OWNER}" ]; then
+    echo "${OWNER}"
+  else
+    echo "${GITHUB_REPOSITORY_OWNER:-}"
+  fi
+}
+
+function validate_inputs() {
+  mask_token "${GITHUB_TOKEN}"
+  mask_token "${RUBYGEMS_TOKEN}"
+  mask_token "${GEMCOOP_TOKEN}"
+  mask_token "${FORGEJO_TOKEN}"
+  mask_token "${GITEA_TOKEN}"
+
+  if [ -z "${GITHUB_TOKEN}" ] && [ -z "${RUBYGEMS_TOKEN}" ] && [ -z "${GEMCOOP_TOKEN}" ] && [ -z "${FORGEJO_TOKEN}" ] && [ -z "${GITEA_TOKEN}" ]; then
+    fail 2 "No API keys found. Please provide at least one of: token, github_token, rubygems_token, gemcoop_token, forgejo_token, or gitea_token."
+  fi
+
+  if [ -z "${OWNER}" ]; then
+    OWNER="${GITHUB_REPOSITORY_OWNER:-}"
+  fi
+
+  if [ -n "${GITHUB_TOKEN}" ] && [ -z "${OWNER}" ]; then
+    fail 2 "GitHub Packages publishing requires owner or GITHUB_REPOSITORY_OWNER."
+  fi
+
+  if [ -n "${FORGEJO_TOKEN}" ]; then
+    if [ -z "${FORGEJO_URL}" ]; then
+      fail 2 "Forgejo publishing requires forgejo_url."
+    fi
+
+    FORGEJO_OWNER="$(package_owner "${FORGEJO_OWNER}")"
+    if [ -z "${FORGEJO_OWNER}" ]; then
+      fail 2 "Forgejo publishing requires forgejo_owner, owner, or GITHUB_REPOSITORY_OWNER."
+    fi
+
+    FORGEJO_HOST="$(trim_trailing_slash "${FORGEJO_URL}")/api/packages/${FORGEJO_OWNER}/rubygems"
+  fi
+
+  if [ -n "${GITEA_TOKEN}" ]; then
+    if [ -z "${GITEA_URL}" ]; then
+      fail 2 "Gitea publishing requires gitea_url."
+    fi
+
+    GITEA_OWNER="$(package_owner "${GITEA_OWNER}")"
+    if [ -z "${GITEA_OWNER}" ]; then
+      fail 2 "Gitea publishing requires gitea_owner, owner, or GITHUB_REPOSITORY_OWNER."
+    fi
+
+    GITEA_HOST="$(trim_trailing_slash "${GITEA_URL}")/api/packages/${GITEA_OWNER}/rubygems"
+  fi
+}
+
+function setup_credentials_file() {
+  echo "Setting up access to RubyGems"
+  mkdir -p ~/.gem
+  touch ~/.gem/credentials
+  chmod 600 ~/.gem/credentials
+  : > ~/.gem/credentials
+
+  if [ -n "${RUBYGEMS_TOKEN}" ]; then
+    echo "Configuring RubyGems.org"
+    echo ":rubygems_api_key: ${RUBYGEMS_TOKEN}" >> ~/.gem/credentials
+    REGISTRIES+=("RubyGems.org")
+  fi
+
+  if [ -n "${GITHUB_TOKEN}" ]; then
+    echo "Configuring GitHub Packages"
+    echo ":github: Bearer ${GITHUB_TOKEN}" >> ~/.gem/credentials
+    REGISTRIES+=("GitHub Packages")
+  fi
+
+  if [ -n "${GEMCOOP_TOKEN}" ]; then
+    echo "Configuring Gem.coop"
+    echo ":gemcoop: ${GEMCOOP_TOKEN}" >> ~/.gem/credentials
+    REGISTRIES+=("Gem.coop")
+  fi
+
+  if [ -n "${FORGEJO_TOKEN}" ]; then
+    echo "Configuring Forgejo"
+    echo "${FORGEJO_HOST}: Bearer ${FORGEJO_TOKEN}" >> ~/.gem/credentials
+    REGISTRIES+=("Forgejo")
+  fi
+
+  if [ -n "${GITEA_TOKEN}" ]; then
+    echo "Configuring Gitea"
+    echo "${GITEA_HOST}: Bearer ${GITEA_TOKEN}" >> ~/.gem/credentials
+    REGISTRIES+=("Gitea")
+  fi
+}
+
+function resolve_gem_full_name() {
+  local gemspec="${1}"
+  local ruby_output
+  local exit_code
+
+  set +e
+  ruby_output="$(ruby -e 'require "rubygems"; spec = Gem::Specification.load(ARGV.fetch(0)); abort "Could not load gemspec #{ARGV.fetch(0)}" unless spec; print spec.full_name' "${gemspec}" 2>&1)"
+  exit_code=$?
+  set -e
+
+  if [ "${exit_code}" -ne 0 ]; then
+    echo "${ruby_output}" >&2
+    fail "${exit_code}" "Failed to load ${gemspec}."
+  fi
+
+  GEM_FULL_NAME="${ruby_output}"
+}
+
+function join_by() {
+  local delimiter="${1}"
+  shift
+
+  local joined=""
+  local value
+  for value in "$@"; do
+    if [ -z "${joined}" ]; then
+      joined="${value}"
+    else
+      joined="${joined}${delimiter}${value}"
+    fi
+  done
+
+  echo "${joined}"
+}
+
+function build_gems() {
+  local gemspecs=(*.gemspec)
+
+  if [ "${#gemspecs[@]}" -eq 0 ]; then
+    fail 1 "No gemspec files found in $(pwd)."
+  fi
+
+  BUILD_DIR="$(mktemp -d)"
+
+  echo "Building gem(s)"
+  local gemspec
+  for gemspec in "${gemspecs[@]}"; do
+    local output
+    resolve_gem_full_name "${gemspec}"
+    output="${BUILD_DIR}/${GEM_FULL_NAME}.gem"
+
+    set +e
+    gem build "${gemspec}" --output "${output}"
+    local exit_code=$?
+    set -e
+
+    if [ "${exit_code}" -ne 0 ]; then
+      fail "${exit_code}" "Failed to build ${gemspec}."
+    fi
+
+    if [ ! -f "${output}" ]; then
+      fail 1 "Gem build did not create ${output}."
+    fi
+
+    BUILT_GEMS+=("${output}")
+  done
+}
+
+function push_rubygems() {
+  local gem_file="${1}"
+  local gem_name
+  gem_name="$(basename "${gem_file}")"
+
+  echo "Pushing ${gem_name} to RubyGems.org"
+  set +e
+  gem push "${gem_file}"
+  local exit_code=$?
+  set -e
+
+  if [ "${exit_code}" -ne 0 ]; then
+    fail "${exit_code}" "Failed to push ${gem_name} to RubyGems.org."
+  fi
+}
+
+function push_github_packages() {
+  local gem_file="${1}"
+  local gem_name
+  local host
+  gem_name="$(basename "${gem_file}")"
+  host="https://rubygems.pkg.github.com/${OWNER}"
+
+  echo "Pushing ${gem_name} to GitHub Packages at ${host}"
+  set +e
+  gem push "${gem_file}" --key "github" --host "${host}"
+  local exit_code=$?
+  set -e
+
+  if [ "${exit_code}" -ne 0 ]; then
+    fail "${exit_code}" "Failed to push ${gem_name} to GitHub Packages at ${host}."
+  fi
+}
+
+function push_gemcoop() {
+  local gem_file="${1}"
+  local gem_name
+  gem_name="$(basename "${gem_file}")"
+
+  echo "Pushing ${gem_name} to Gem.coop"
+  set +e
+  gem push "${gem_file}" --key "gemcoop" --host "https://gem.coop"
+  local exit_code=$?
+  set -e
+
+  if [ "${exit_code}" -ne 0 ]; then
+    fail "${exit_code}" "Failed to push ${gem_name} to Gem.coop."
+  fi
+}
+
+function push_forgejo() {
+  local gem_file="${1}"
+  local gem_name
+  gem_name="$(basename "${gem_file}")"
+
+  echo "Pushing ${gem_name} to Forgejo at ${FORGEJO_HOST}"
+  set +e
+  gem push --host "${FORGEJO_HOST}" "${gem_file}"
+  local exit_code=$?
+  set -e
+
+  if [ "${exit_code}" -ne 0 ]; then
+    fail "${exit_code}" "Failed to push ${gem_name} to Forgejo at ${FORGEJO_HOST}."
+  fi
+}
+
+function push_gitea() {
+  local gem_file="${1}"
+  local gem_name
+  gem_name="$(basename "${gem_file}")"
+
+  echo "Pushing ${gem_name} to Gitea at ${GITEA_HOST}"
+  set +e
+  gem push --host "${GITEA_HOST}" "${gem_file}"
+  local exit_code=$?
+  set -e
+
+  if [ "${exit_code}" -ne 0 ]; then
+    fail "${exit_code}" "Failed to push ${gem_name} to Gitea at ${GITEA_HOST}."
+  fi
+}
+
+function push_gems() {
+  local gem_file
+
+  for gem_file in "${BUILT_GEMS[@]}"; do
+    if [ -n "${RUBYGEMS_TOKEN}" ]; then
+      push_rubygems "${gem_file}"
+    fi
+
+    if [ -n "${GITHUB_TOKEN}" ]; then
+      push_github_packages "${gem_file}"
+    fi
+
+    if [ -n "${GEMCOOP_TOKEN}" ]; then
+      push_gemcoop "${gem_file}"
+    fi
+
+    if [ -n "${FORGEJO_TOKEN}" ]; then
+      push_forgejo "${gem_file}"
+    fi
+
+    if [ -n "${GITEA_TOKEN}" ]; then
+      push_gitea "${gem_file}"
+    fi
+  done
+}
+
+function write_summary() {
+  if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
+    return
+  fi
+
+  {
+    echo "## Published Ruby Gem(s)"
+    echo
+    echo "| Gem | Registries |"
+    echo "| --- | --- |"
+
+    local gem_file
+    for gem_file in "${BUILT_GEMS[@]}"; do
+      echo "| $(basename "${gem_file}") | $(join_by ", " "${REGISTRIES[@]}") |"
+    done
+  } >> "${GITHUB_STEP_SUMMARY}"
+}
+
+setup_git
+validate_inputs
+setup_credentials_file
+build_gems
+push_gems
+write_summary
