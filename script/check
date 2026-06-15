@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+shell_scripts=(script/publish test/publish_test.sh script/check)
+
+bash -n "${shell_scripts[@]}"
+shellcheck "${shell_scripts[@]}"
+ruby -e 'require "yaml"; YAML.load_file("action.yml")'
+actionlint
+bash test/publish_test.sh

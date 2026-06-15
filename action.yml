@@ -1,5 +1,5 @@
-name: "Publish Gem to GitHub Packages"
-description: "Builds and publishes Ruby gems to GitHub Packages"
+name: "Publish Ruby Gem"
+description: "Builds and publishes Ruby gems to GitHub Packages, RubyGems.org, Gem.coop, Forgejo, and Gitea"
 author: "Dan Webb"
 branding:
   color: green
@@ -16,6 +16,24 @@ inputs:
     required: false
   gemcoop_token:
     description: "API key for gem.coop."
+    required: false
+  forgejo_token:
+    description: "Personal access token for a Forgejo RubyGems package registry."
+    required: false
+  forgejo_url:
+    description: "Base URL for the Forgejo instance, for example https://forgejo.example.com."
+    required: false
+  forgejo_owner:
+    description: "User or organization account that owns the Forgejo package. Defaults to owner or GITHUB_REPOSITORY_OWNER."
+    required: false
+  gitea_token:
+    description: "Personal access token for a Gitea RubyGems package registry."
+    required: false
+  gitea_url:
+    description: "Base URL for the Gitea instance, for example https://gitea.example.com."
+    required: false
+  gitea_owner:
+    description: "User or organization account that owns the Gitea package. Defaults to owner or GITHUB_REPOSITORY_OWNER."
     required: false
   owner:
     description: "Name of the user or organization account that owns the repository containing your project. Defaults to $GITHUB_REPOSITORY_OWNER"
@@ -39,72 +57,15 @@ runs:
 
     - shell: bash
       working-directory: ${{ inputs.working-directory }}
-      run: |
-        git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-        
-        # Collect tokens
-        GITHUB_TOKEN="${{ inputs.github_token || inputs.token }}"
-        RUBYGEMS_TOKEN="${{ inputs.rubygems_token }}"
-        GEMCOOP_TOKEN="${{ inputs.gemcoop_token }}"
-        
-        # Check if at least one token is provided
-        if [ -z "$GITHUB_TOKEN" ] && [ -z "$RUBYGEMS_TOKEN" ] && [ -z "$GEMCOOP_TOKEN" ]; then
-          echo "Error: No API keys found. Please provide at least one of: token, github_token, rubygems_token, or gemcoop_token."
-          exit 2
-        fi
-        
-        # Determine owner for GitHub Packages
-        OWNER="${{ inputs.owner }}"
-        if [ -z "$OWNER" ]; then
-          OWNER="${GITHUB_REPOSITORY_OWNER}"
-        fi
-        
-        echo "Setting up access to RubyGems"
-        mkdir -p ~/.gem
-        touch ~/.gem/credentials
-        chmod 600 ~/.gem/credentials
-        
-        # Build credentials file
-        # We start with an empty file and append each configured host
-        : > ~/.gem/credentials
-        
-        if [ -n "$RUBYGEMS_TOKEN" ]; then
-          echo "Configuring RubyGems.org"
-          echo ":rubygems_api_key: ${RUBYGEMS_TOKEN}" >> ~/.gem/credentials
-        fi
-        
-        if [ -n "$GITHUB_TOKEN" ]; then
-          echo "Configuring GitHub Packages"
-          echo ":github: Bearer ${GITHUB_TOKEN}" >> ~/.gem/credentials
-        fi
-        
-        if [ -n "$GEMCOOP_TOKEN" ]; then
-          echo "Configuring Gem.coop"
-          # Assuming standard token usage for gem.coop
-          echo ":gemcoop: ${GEMCOOP_TOKEN}" >> ~/.gem/credentials
-        fi
-        
-        echo "Building gem(s)"
-        find . -name '*.gemspec' -maxdepth 1 -exec gem build {} \;
-        
-        # Push to each configured registry
-        for gem in *.gem; do
-          if [ -f "$gem" ]; then
-            
-            if [ -n "$RUBYGEMS_TOKEN" ]; then
-              echo "Pushing $gem to RubyGems.org"
-              gem push "$gem"
-            fi
-            
-            if [ -n "$GITHUB_TOKEN" ]; then
-              echo "Pushing $gem to GitHub Packages host https://rubygems.pkg.github.com/${OWNER}"
-              gem push "$gem" --key "github" --host "https://rubygems.pkg.github.com/${OWNER}"
-            fi
-            
-            if [ -n "$GEMCOOP_TOKEN" ]; then
-              echo "Pushing $gem to Gem.coop"
-              gem push "$gem" --key "gemcoop" --host "https://gem.coop"
-            fi
-            
-          fi
-        done
+      env:
+        PUBLISH_GEM_GITHUB_TOKEN: ${{ inputs.github_token || inputs.token }}
+        PUBLISH_GEM_RUBYGEMS_TOKEN: ${{ inputs.rubygems_token }}
+        PUBLISH_GEM_GEMCOOP_TOKEN: ${{ inputs.gemcoop_token }}
+        PUBLISH_GEM_OWNER: ${{ inputs.owner }}
+        PUBLISH_GEM_FORGEJO_TOKEN: ${{ inputs.forgejo_token }}
+        PUBLISH_GEM_FORGEJO_URL: ${{ inputs.forgejo_url }}
+        PUBLISH_GEM_FORGEJO_OWNER: ${{ inputs.forgejo_owner }}
+        PUBLISH_GEM_GITEA_TOKEN: ${{ inputs.gitea_token }}
+        PUBLISH_GEM_GITEA_URL: ${{ inputs.gitea_url }}
+        PUBLISH_GEM_GITEA_OWNER: ${{ inputs.gitea_owner }}
+      run: "${GITHUB_ACTION_PATH}/script/publish"
